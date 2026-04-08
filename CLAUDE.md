@@ -114,10 +114,28 @@ Comprehensive docs are in the `docs/` folder:
 
 ## Testing Strategy
 
-- **Unit tests** for type conversions and utilities
-- **Integration tests** with `MockClient` for agent loop
-- **Doc tests** for API examples (they should compile and run)
-- **No external service tests** in CI - those go in a separate test suite
+- **Unit tests** for type conversions and utilities (in `#[cfg(test)]` modules)
+- **Examples as integration tests** - each example in `examples/` serves dual purpose:
+  1. Educational: shows how to use the API
+  2. Verification: exercises real code paths end-to-end
+- **MockClient** for deterministic testing without API keys
+- **No external service tests** in CI - examples use mocks
+
+### Examples Are Integration Tests
+
+Every example should:
+1. Be runnable without API keys (use MockClient for LLM calls)
+2. Exercise a specific feature or workflow
+3. Have clear output showing what's happening
+4. Fail visibly if something breaks
+
+Run all examples to verify the system works:
+```bash
+cargo run --example simple_agent -p agent-core
+# Add more examples as they're created
+```
+
+See `CONTRIBUTING.md` for guidelines on adding examples.
 
 ## Feature Flags
 
@@ -135,9 +153,9 @@ bedrock = ["aws-config", "aws-sdk-bedrockruntime"]  # AWS Bedrock support
 - `agent-core/src/client.rs` - LlmClient trait
 - `agent-core/src/tool.rs` - Tool trait
 - `agent-core/src/types.rs` - Request, Response, Message, etc.
-- `agent-core/src/context.rs` - ContextManager
-- `agent-core/src/store.rs` - ContextStore (SQLite)
 - `agent-core/src/providers/` - Provider implementations
+- `agent-core/examples/` - Integration tests (runnable examples)
+- `agent-tools/src/` - Built-in tool implementations
 
 ## Things to Avoid
 
@@ -155,5 +173,10 @@ bedrock = ["aws-config", "aws-sdk-bedrockruntime"]  # AWS Bedrock support
 2. **Keep changes minimal** - do only what's necessary
 3. **Update documentation** if behavior changes
 4. **Add comments** explaining why, not just what
-5. **Run tests** before committing
+5. **Run tests and examples** before committing:
+   ```bash
+   cargo test
+   cargo run --example simple_agent -p agent-core
+   ```
 6. **Keep the line count low** - if a change adds significant lines, question if it's necessary
+7. **See `CONTRIBUTING.md`** for detailed guidelines
