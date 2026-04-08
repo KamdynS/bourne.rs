@@ -2,93 +2,74 @@
 
 This document explains how to contribute to agent-rs while maintaining its educational and quality goals.
 
-## Examples Are Integration Tests
+## Testing Strategy
 
-In agent-rs, **examples serve two purposes**:
+We use a two-tier testing approach:
 
-1. **Documentation**: Show users how to use the API
-2. **Integration testing**: Verify the system works end-to-end
+| Type | Location | API Key? | Purpose |
+|------|----------|----------|---------|
+| Unit tests | `src/**/*.rs` | No | Test internal logic with mocks |
+| Integration tests | `examples/live_*.rs` | **Yes** | Test real API round-trips |
+| Mock demos | `examples/mock_*.rs` | No | Educational examples |
 
-This approach keeps tests close to real usage and ensures our examples always work.
+### Unit Tests (No API Key)
 
-### Writing an Example
-
-Every example should follow this pattern:
-
-```rust
-//! Example Title
-//!
-//! Brief description of what this example demonstrates.
-//!
-//! # What This Shows
-//!
-//! - Bullet points of concepts demonstrated
-//! - Each point should teach something
-//!
-//! # Running
-//!
-//! ```bash
-//! cargo run --example example_name -p crate-name
-//! ```
-
-// Use MockClient for deterministic behavior without API keys
-let client = MockClient::new(vec![
-    MockResponse::text("Expected response"),
-]);
-
-// Build and run the agent/component being tested
-// ...
-
-// Print output that shows the system working
-println!("Result: {result}");
-```
-
-### Example Guidelines
-
-1. **No API keys required** - Use `MockClient` with scripted responses
-2. **Clear output** - Print what's happening so users can follow along
-3. **Self-contained** - Each example should work independently
-4. **Educational comments** - Explain why, not just what
-5. **Error handling** - Show how to handle errors gracefully
-
-### What to Test via Examples
-
-| Feature | Example Name | What It Tests |
-|---------|--------------|---------------|
-| Basic agent flow | `simple_agent` | Tool calls, event streaming, completion |
-| Multiple tools | (future) | Tool selection, parallel execution |
-| Error recovery | (future) | Tool errors, LLM retries |
-| Cancellation | (future) | Graceful shutdown mid-execution |
-| Streaming | (future) | Real-time text output |
-
-### Running All Examples
-
-```bash
-# Run each example to verify the system
-cargo run --example simple_agent -p agent-core
-
-# Add new examples to this list as they're created
-```
-
-## Unit Tests
-
-Unit tests go in `#[cfg(test)]` modules within source files. Use them for:
+Unit tests use `MockClient` and run with `cargo test`. They verify:
 
 - Type conversions and parsing
-- Edge cases in utility functions
-- Error classification logic
+- Agent loop state machine
+- Error classification
+- Tool dispatch logic
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_specific_behavior() {
-        // Test one thing clearly
-    }
-}
+```bash
+cargo test  # Runs all unit tests, no API key needed
 ```
+
+Contributors can run unit tests without any setup.
+
+### Integration Tests (API Key Required)
+
+Integration tests (`examples/live_*.rs`) hit real LLM APIs. They verify:
+
+- Request serialization is correct
+- SSE streaming works end-to-end
+- Tool calls round-trip properly
+- Provider-specific quirks are handled
+
+**Setup:**
+
+1. Copy `.env.example` to `.env`
+2. Add your API key: `ANTHROPIC_API_KEY=sk-ant-...`
+3. Run:
+
+```bash
+cargo run --example live_simple -p agent-core
+```
+
+**When to run integration tests:**
+
+- Before submitting a PR that touches providers or the agent loop
+- Before releases
+- When debugging "works in tests, fails in production" issues
+
+### Mock Demos (No API Key)
+
+Mock demos (`examples/mock_*.rs`) are for learning. They show how the API works with scripted responses. Not real integration tests, but useful for:
+
+- Understanding the event flow
+- Documentation examples
+- Quick iteration during development
+
+```bash
+cargo run --example mock_demo -p agent-core
+```
+
+## Example Index
+
+| Example | Type | What It Tests |
+|---------|------|---------------|
+| `mock_demo` | Mock | Agent construction, event streaming |
+| `live_simple` | Live | Basic Anthropic API integration, tool calls |
 
 ## Adding New Features
 
@@ -103,12 +84,39 @@ mod tests {
 - [ ] Feature is minimal and focused
 - [ ] Public APIs have doc comments (what, why, when to use)
 - [ ] Non-obvious code has inline comments
-- [ ] Unit tests cover edge cases
-- [ ] Example demonstrates the feature
-- [ ] Existing tests still pass (`cargo test`)
-- [ ] Existing examples still run
+- [ ] Unit tests cover edge cases (with mocks)
+- [ ] Integration test verifies real behavior (if touching API code)
+- [ ] `cargo test` passes
+- [ ] `cargo run --example live_simple` works (if you have a key)
 
-### Commit Messages
+### Adding a New Integration Test
+
+```rust
+//! examples/live_feature.rs
+
+use agent_core::{AgentBuilder, AnthropicClient, ...};
+
+#[tokio::main]
+async fn main() {
+    // Load .env
+    dotenvy::dotenv().ok();
+
+    // Get API key or exit with helpful message
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .expect("Set ANTHROPIC_API_KEY in .env");
+
+    // Use real client
+    let client = AnthropicClient::new(api_key, "claude-sonnet-4-20250514");
+
+    // Test the feature
+    // ...
+
+    // Print verification
+    println!("[PASS] Feature works");
+}
+```
+
+## Commit Messages
 
 Write educational commit messages that explain:
 

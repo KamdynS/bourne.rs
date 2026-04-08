@@ -114,28 +114,39 @@ Comprehensive docs are in the `docs/` folder:
 
 ## Testing Strategy
 
-- **Unit tests** for type conversions and utilities (in `#[cfg(test)]` modules)
-- **Examples as integration tests** - each example in `examples/` serves dual purpose:
-  1. Educational: shows how to use the API
-  2. Verification: exercises real code paths end-to-end
-- **MockClient** for deterministic testing without API keys
-- **No external service tests** in CI - examples use mocks
+Two-tier approach separating fast/free from thorough/real:
 
-### Examples Are Integration Tests
+| Type | Command | API Key? | Purpose |
+|------|---------|----------|---------|
+| Unit tests | `cargo test` | No | Logic with mocks |
+| Integration | `cargo run --example live_*` | **Yes** | Real API verification |
+| Mock demos | `cargo run --example mock_*` | No | Educational |
 
-Every example should:
-1. Be runnable without API keys (use MockClient for LLM calls)
-2. Exercise a specific feature or workflow
-3. Have clear output showing what's happening
-4. Fail visibly if something breaks
+### Unit Tests (No API Key)
 
-Run all examples to verify the system works:
+Use `MockClient` in `#[cfg(test)]` modules. Test:
+- Type conversions, parsing, error classification
+- Agent loop state machine
+- Tool dispatch
+
+### Integration Tests (API Key Required)
+
+Live examples (`examples/live_*.rs`) hit real APIs. Test:
+- Request serialization
+- SSE streaming end-to-end
+- Tool call round-trips
+
+Setup: Copy `.env.example` to `.env`, add your `ANTHROPIC_API_KEY`.
+
+### Verification Before Commits
+
 ```bash
-cargo run --example simple_agent -p agent-core
-# Add more examples as they're created
+cargo test                                           # Unit tests
+cargo run --example mock_demo -p agent-core          # Mock demo works
+cargo run --example live_simple -p agent-core        # Integration (if you have a key)
 ```
 
-See `CONTRIBUTING.md` for guidelines on adding examples.
+See `CONTRIBUTING.md` for detailed guidelines.
 
 ## Feature Flags
 

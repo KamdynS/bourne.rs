@@ -13,3 +13,6 @@ thiserror.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
+
+[dev-dependencies]
+dotenvy = "0.15"

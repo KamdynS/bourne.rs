@@ -1,20 +1,25 @@
-//! Simple Agent Example
+//! Mock Demo - Educational Example (No API Key Required)
 //!
-//! This example demonstrates how to build and run an agent with tools.
-//! It uses MockClient to show the flow without requiring an API key.
+//! This example demonstrates the agent architecture using MockClient.
+//! It's for learning and documentation - see `live_simple` for real API testing.
 //!
 //! # What This Shows
 //!
-//! 1. **Building an agent**: Using AgentBuilder to configure client, tools, and parameters
-//! 2. **Tool registration**: Adding tools that the LLM can call
-//! 3. **Event streaming**: Processing events as the agent works
-//! 4. **The agentic loop**: How the agent calls tools and continues until done
+//! 1. **Agent construction**: AgentBuilder configuration
+//! 2. **Tool implementation**: The Tool trait in action
+//! 3. **Event streaming**: Processing AgentEvents as they occur
+//! 4. **The agentic loop**: Tool calls → results → continuation
 //!
 //! # Running
 //!
 //! ```bash
-//! cargo run --example simple_agent -p agent-core
+//! cargo run --example mock_demo -p agent-core
 //! ```
+//!
+//! # Note
+//!
+//! This uses scripted responses - behavior is deterministic but not real.
+//! For actual integration testing, see `live_simple`.
 
 use agent_core::{
     mock::{MockClient, MockResponse},
