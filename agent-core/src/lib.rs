@@ -1,6 +1,7 @@
 mod agent;
 mod client;
 mod error;
+pub mod mock;
 mod providers;
 mod tool;
 mod types;

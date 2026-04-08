@@ -299,30 +299,38 @@ impl AgentState {
 
     /// Get the next event, driving the state machine forward.
     async fn next_event(&mut self) -> Option<Result<AgentEvent, AgentError>> {
-        // 1. Drain any pending events first
-        if let Some(event) = self.pending_events.pop() {
-            return Some(event);
-        }
-
-        if self.done {
-            return None;
-        }
-
-        // 2. If we have tool calls waiting and no stream, execute them
-        if !self.tool_calls.is_empty() && self.stream.is_none() {
-            return Some(self.execute_tools().await);
-        }
-
-        // 3. If no stream, start a new turn
-        if self.stream.is_none() {
-            if let Err(e) = self.start_turn() {
-                self.done = true;
-                return Some(Err(e));
+        loop {
+            // 1. Drain any pending events first
+            if let Some(event) = self.pending_events.pop() {
+                return Some(event);
             }
-        }
 
-        // 4. Process the stream
-        self.process_stream().await
+            if self.done {
+                return None;
+            }
+
+            // 2. If we have tool calls waiting and no stream, execute them
+            if !self.tool_calls.is_empty() && self.stream.is_none() {
+                return Some(self.execute_tools().await);
+            }
+
+            // 3. If no stream, start a new turn
+            if self.stream.is_none() {
+                if let Err(e) = self.start_turn() {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            }
+
+            // 4. Process the stream
+            // If process_stream returns None, it means the stream ended but we
+            // might have more work (tool execution). Loop back to check.
+            if let Some(event) = self.process_stream().await {
+                return Some(event);
+            }
+            // process_stream returned None - loop back to handle tool execution
+            // or start next turn
+        }
     }
 
     /// Start a new turn: validate, build request, begin streaming.
@@ -361,17 +369,23 @@ impl AgentState {
     /// Process chunks from the LLM stream.
     async fn process_stream(&mut self) -> Option<Result<AgentEvent, AgentError>> {
         loop {
-            // Get next chunk from stream
-            let chunk = {
-                let stream = self.stream.as_mut()?;
-                stream.next().await
+            // Check if stream exists - if not, we need to continue to next phase
+            let stream = match self.stream.as_mut() {
+                Some(s) => s,
+                None => {
+                    // Stream was consumed (e.g., after MessageDone with ToolUse)
+                    // Return None to let next_event handle the next phase
+                    return None;
+                }
             };
 
-            match chunk {
+            match stream.next().await {
                 Some(Ok(chunk)) => {
                     if let Some(result) = self.handle_chunk(chunk) {
                         return Some(result);
                     }
+                    // handle_chunk returned None, loop to get next chunk
+                    // (but stream might now be None, so we'll check at top of loop)
                 }
                 Some(Err(e)) => {
                     self.done = true;
@@ -556,9 +570,49 @@ impl AgentState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::{MockClient, MockResponse};
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use serde_json::{json, Value};
 
-    // Tests would go here, but they require a mock LlmClient.
-    // For now, we verify the module compiles correctly.
+    // -------------------------------------------------------------------------
+    // Test Tool: Echo
+    // -------------------------------------------------------------------------
+
+    /// A simple tool that echoes its input. Used for testing.
+    struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echo the message back"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                },
+                "required": ["message"]
+            })
+        }
+
+        async fn execute(&self, input: Value) -> ToolOutput {
+            match input.get("message").and_then(|v| v.as_str()) {
+                Some(msg) => ToolOutput::success(format!("Echo: {}", msg)),
+                None => ToolOutput::error("Missing 'message' parameter"),
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Tests
+    // -------------------------------------------------------------------------
 
     #[test]
     fn test_agent_event_is_send() {
@@ -575,5 +629,156 @@ mod tests {
         let error = ToolOutput::error("failed");
         assert!(error.is_error);
         assert_eq!(error.content, "failed");
+    }
+
+    // -------------------------------------------------------------------------
+    // Agent Loop Tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_agent_simple_response() {
+        // Mock returns a simple text response
+        let client = MockClient::new(vec![MockResponse::text("Hello, world!")]);
+
+        let agent = AgentBuilder::new(Box::new(client))
+            .system_prompt("Be helpful")
+            .build();
+
+        let events: Vec<_> = agent
+            .run("Say hello")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Should have Text events, TurnComplete, and Done
+        let has_text = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Text(s) if s.contains("Hello")));
+        let has_done = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Done { final_text } if final_text.contains("Hello")));
+        let has_turn_complete = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnComplete { turn: 1, .. }));
+
+        assert!(has_text, "Should have text events");
+        assert!(has_done, "Should have Done event");
+        assert!(has_turn_complete, "Should have TurnComplete event");
+    }
+
+    #[tokio::test]
+    async fn test_agent_with_tool_call() {
+        // Mock returns a tool call, then a final response
+        let client = MockClient::new(vec![
+            MockResponse::tool_call("Let me echo that", "tool_1", "echo", json!({"message": "test"})),
+            MockResponse::text("I echoed your message."),
+        ]);
+
+        let agent = AgentBuilder::new(Box::new(client))
+            .tools(vec![Box::new(EchoTool)])
+            .build();
+
+        let events: Vec<_> = agent
+            .run("Echo test")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Should have ToolStart, ToolEnd events
+        let has_tool_start = events.iter().any(|e| {
+            matches!(e, AgentEvent::ToolStart { name, .. } if name == "echo")
+        });
+        let has_tool_end = events.iter().any(|e| {
+            matches!(e, AgentEvent::ToolEnd { output, .. } if output.content.contains("Echo: test"))
+        });
+
+        assert!(has_tool_start, "Should have ToolStart event");
+        assert!(has_tool_end, "Should have ToolEnd with echo output");
+
+        // Should complete with two turns
+        let turn_completes: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TurnComplete { turn, .. } => Some(*turn),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(turn_completes, vec![1, 2], "Should have 2 turns");
+    }
+
+    #[tokio::test]
+    async fn test_agent_unknown_tool() {
+        // Mock calls a tool that doesn't exist
+        let client = MockClient::new(vec![
+            MockResponse::tool_only("tool_1", "nonexistent", json!({})),
+            MockResponse::text("Tool failed, sorry."),
+        ]);
+
+        let agent = AgentBuilder::new(Box::new(client))
+            .tools(vec![]) // No tools registered
+            .build();
+
+        let events: Vec<_> = agent
+            .run("Use unknown tool")
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Should have ToolEnd with error
+        let has_error = events.iter().any(|e| {
+            matches!(e, AgentEvent::ToolEnd { output, .. } if output.is_error)
+        });
+
+        assert!(has_error, "Unknown tool should produce error output");
+    }
+
+    #[tokio::test]
+    async fn test_agent_max_turns() {
+        // Mock keeps returning tool calls forever
+        let responses: Vec<_> = (0..10)
+            .map(|i| MockResponse::tool_only(format!("tool_{}", i), "echo", json!({"message": "loop"})))
+            .collect();
+
+        let client = MockClient::new(responses);
+
+        let agent = AgentBuilder::new(Box::new(client))
+            .tools(vec![Box::new(EchoTool)])
+            .max_turns(3)
+            .build();
+
+        let results: Vec<_> = agent.run("Loop forever").collect().await;
+
+        // Should have an error for exceeding max turns
+        let has_max_turns_error = results.iter().any(|r| {
+            matches!(r, Err(AgentError::MaxTurnsExceeded(3)))
+        });
+
+        assert!(has_max_turns_error, "Should error on max turns exceeded");
+    }
+
+    #[tokio::test]
+    async fn test_agent_cancellation() {
+        let client = MockClient::new(vec![MockResponse::text("Should not see this")]);
+
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel(); // Cancel immediately
+
+        let agent = AgentBuilder::new(Box::new(client))
+            .cancellation_token(cancel_token)
+            .build();
+
+        let results: Vec<_> = agent.run("Cancelled task").collect().await;
+
+        let has_cancelled_error = results
+            .iter()
+            .any(|r| matches!(r, Err(AgentError::Cancelled)));
+
+        assert!(has_cancelled_error, "Should error on cancellation");
     }
 }
