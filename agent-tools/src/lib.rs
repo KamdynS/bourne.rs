@@ -31,5 +31,7 @@
 //! Return [`ToolOutput::error()`](agent_core::ToolOutput::error) for failures.
 
 mod bash;
+mod file;
 
 pub use bash::BashTool;
+pub use file::FileTool;
