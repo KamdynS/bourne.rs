@@ -1,17 +1,78 @@
+//! Core types for LLM requests and responses.
+//!
+//! These types form the provider-agnostic data model. The agent loop works with
+//! these types; providers translate to/from their native formats.
+//!
+//! # Design Philosophy
+//!
+//! These types mirror what LLMs actually send and receive, not what's convenient
+//! for us. This keeps the translation layer thin and the mental model clear.
+//!
+//! # Type Hierarchy
+//!
+//! ```text
+//! Request
+//! ├── system: Option<String>      # System prompt
+//! ├── messages: Vec<Message>      # Conversation history
+//! │   └── Message
+//! │       ├── role: Role          # User or Assistant
+//! │       └── content: Vec<ContentBlock>
+//! │           ├── Text(String)
+//! │           ├── ToolUse { id, name, input }
+//! │           └── ToolResult { id, content, is_error }
+//! ├── tools: Vec<ToolDef>         # Available tools
+//! └── max_tokens: u32             # Response limit
+//!
+//! Response
+//! ├── content: Vec<ContentBlock>  # Model's response
+//! ├── stop_reason: StopReason     # Why it stopped
+//! └── usage: TokenUsage           # Token counts
+//! ```
+
+// =============================================================================
+// TOKEN USAGE
+// =============================================================================
+
 /// Token usage statistics from an LLM response.
+///
+/// Tokens are the billing unit for LLMs. Tracking usage helps with:
+/// - Cost estimation and budgeting
+/// - Context window management (knowing when to evict old messages)
+/// - Debugging (unexpected high usage might indicate a bug)
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TokenUsage {
+    /// Tokens in the input (system prompt + conversation history + tool defs).
+    /// This grows as the conversation continues.
     pub input_tokens: u32,
+
+    /// Tokens in the model's output (text + tool calls).
+    /// This varies per response based on what the model generates.
     pub output_tokens: u32,
 }
 
 impl TokenUsage {
+    /// Total tokens used in this request/response cycle.
     pub fn total(&self) -> u32 {
         self.input_tokens + self.output_tokens
     }
 }
 
+// =============================================================================
+// REQUEST TYPES
+// =============================================================================
+
 /// A request to an LLM.
+///
+/// This is the provider-agnostic request format. Each LlmClient implementation
+/// translates this to the provider's native JSON format.
+///
+/// # Fields
+///
+/// - `system`: Instructions that apply to the entire conversation. Most models
+///   treat this specially (separate from user messages).
+/// - `messages`: The conversation history. Must alternate user/assistant roles.
+/// - `tools`: Tool definitions the model can call. Empty if no tools available.
+/// - `max_tokens`: Maximum tokens to generate. Safety limit to prevent runaway.
 #[derive(Debug, Clone)]
 pub struct Request {
     pub system: Option<String>,
@@ -21,6 +82,22 @@ pub struct Request {
 }
 
 /// A message in the conversation.
+///
+/// Messages form the conversation history sent to the LLM. They must alternate
+/// between User and Assistant roles (with some exceptions for tool results).
+///
+/// # Content Blocks
+///
+/// A message can contain multiple content blocks. For example, an assistant
+/// message might have:
+/// 1. Text explaining what it's about to do
+/// 2. A ToolUse block calling a tool
+/// 3. More text
+/// 4. Another ToolUse block
+///
+/// User messages typically contain either:
+/// - Just text (the user's input)
+/// - ToolResult blocks (responses to the assistant's tool calls)
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
@@ -28,6 +105,12 @@ pub struct Message {
 }
 
 /// Message sender role.
+///
+/// LLM conversations are turn-based between User and Assistant. The model
+/// generates Assistant messages; we provide User messages.
+///
+/// Note: Some providers have a "System" role, but we handle system prompts
+/// separately (in Request.system) for better cross-provider compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     User,
@@ -35,14 +118,39 @@ pub enum Role {
 }
 
 /// A block of content within a message.
+///
+/// Messages can contain multiple blocks of different types. This enum covers
+/// all content types needed for tool-using agents:
+///
+/// - `Text`: Plain text from the user or model
+/// - `ToolUse`: The model requesting to call a tool (in assistant messages)
+/// - `ToolResult`: Our response to a tool call (in user messages)
+///
+/// # Tool Call Flow
+///
+/// 1. Model sends: `[Text("Let me check"), ToolUse { name: "bash", ... }]`
+/// 2. We execute the tool
+/// 3. We send: `[ToolResult { id: same_id, content: output, is_error: false }]`
+/// 4. Model continues with the result
 #[derive(Debug, Clone)]
 pub enum ContentBlock {
+    /// Plain text content.
     Text(String),
+
+    /// A tool call from the assistant.
+    ///
+    /// The `id` is generated by the model and must be echoed back in the
+    /// corresponding ToolResult. The `input` is JSON matching the tool's schema.
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
+
+    /// Result of a tool execution, sent back to the model.
+    ///
+    /// The `id` must match the ToolUse.id we're responding to. The `content`
+    /// is the tool's output (or error message if is_error is true).
     ToolResult {
         id: String,
         content: String,
@@ -51,35 +159,117 @@ pub enum ContentBlock {
 }
 
 /// Tool definition sent to the LLM.
+///
+/// This tells the model what tools are available and how to call them.
+/// The model uses this to decide when to call tools and construct valid inputs.
+///
+/// # Input Schema
+///
+/// The `input_schema` is a JSON Schema object describing the tool's parameters.
+/// Example:
+/// ```json
+/// {
+///   "type": "object",
+///   "properties": {
+///     "command": { "type": "string", "description": "The bash command" }
+///   },
+///   "required": ["command"]
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ToolDef {
+    /// Tool name. Should be lowercase, alphanumeric with underscores.
+    /// Examples: "bash", "read_file", "web_search"
     pub name: String,
+
+    /// Human-readable description. The model uses this to decide when to
+    /// use the tool. Be specific about capabilities and limitations.
     pub description: String,
+
+    /// JSON Schema for the tool's input parameters.
     pub input_schema: serde_json::Value,
 }
 
-/// A complete response from an LLM.
+// =============================================================================
+// RESPONSE TYPES
+// =============================================================================
+
+/// A complete (non-streaming) response from an LLM.
+///
+/// Contains the model's full response, why it stopped, and token usage.
+/// For streaming responses, these fields are accumulated from StreamChunks.
 #[derive(Debug, Clone)]
 pub struct Response {
+    /// The model's response content. May contain text, tool calls, or both.
     pub content: Vec<ContentBlock>,
+
+    /// Why the model stopped generating.
     pub stop_reason: StopReason,
+
+    /// Token usage for this request/response.
     pub usage: TokenUsage,
 }
 
 /// Why the model stopped generating.
+///
+/// This tells us what to do next:
+/// - `EndTurn`: Model finished, we can present the response
+/// - `ToolUse`: Model wants to call tools, we should execute them
+/// - `MaxTokens`: Hit the limit, response may be incomplete
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
+    /// Model finished its response naturally. This is the normal completion.
     EndTurn,
+
+    /// Model wants to use tools. We should execute the tools and continue.
     ToolUse,
+
+    /// Hit the max_tokens limit. Response may be truncated.
     MaxTokens,
 }
 
+// =============================================================================
+// STREAMING TYPES
+// =============================================================================
+
 /// A chunk from a streaming response.
+///
+/// Streaming lets us display output as it's generated, improving perceived
+/// latency. The model sends chunks; we accumulate them into a full response.
+///
+/// # Chunk Sequence
+///
+/// For a simple text response:
+/// ```text
+/// Text("Hello") → Text(" world") → Text("!") → MessageDone
+/// ```
+///
+/// For a tool call:
+/// ```text
+/// Text("Let me ") → Text("check") → ToolUseStart { id, name }
+/// → ToolUseInput("{") → ToolUseInput('"cmd"') → ToolUseInput(": ...}")
+/// → ToolUseDone → MessageDone
+/// ```
+///
+/// The agent loop accumulates Text chunks and ToolUseInput chunks, parsing
+/// the tool input JSON when ToolUseDone arrives.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
+    /// A piece of text content. Accumulate these for the full response.
     Text(String),
+
+    /// Start of a tool call. Contains the ID and name upfront.
     ToolUseStart { id: String, name: String },
+
+    /// A fragment of tool call input JSON. Accumulate until ToolUseDone.
     ToolUseInput(String),
+
+    /// End of the current tool call. Parse the accumulated input now.
     ToolUseDone,
-    MessageDone { stop_reason: StopReason, usage: TokenUsage },
+
+    /// End of the complete message. Contains final stop_reason and usage.
+    MessageDone {
+        stop_reason: StopReason,
+        usage: TokenUsage,
+    },
 }
