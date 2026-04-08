@@ -6,23 +6,37 @@
 //!
 //! # Available Tools
 //!
+//! ## General Purpose
+//!
 //! - [`BashTool`]: Execute shell commands (the "escape hatch" for any operation)
+//! - [`FileTool`]: Structured file operations with safety controls
+//!
+//! ## Unix-Style Tools
+//!
+//! Focused, composable tools following the Unix philosophy:
+//!
+//! - [`CatTool`]: Read file contents
+//! - [`HeadTool`]: Read first N lines of a file
+//! - [`FindTool`]: Find files by name pattern
+//! - [`RipgrepTool`]: Search file contents with regex
 //!
 //! # Philosophy
 //!
-//! We keep the built-in tool set minimal. The bash tool alone can accomplish
-//! most tasks through composition of standard Unix utilities. Specialized tools
-//! are only added when they provide significant value over bash:
+//! Two approaches are available:
 //!
-//! - **Better error handling**: Structured errors vs. parsing stderr
-//! - **Safety**: Controlled operations vs. arbitrary shell execution
-//! - **Convenience**: Common operations that would be verbose in bash
+//! 1. **BashTool**: The escape hatch. Can do anything but requires parsing output.
+//! 2. **Unix tools**: Focused tools that do one thing well with structured I/O.
+//!
+//! The Unix tools compose naturally:
+//! - `find` to locate files
+//! - `rg` to search contents
+//! - `head` or `cat` to read results
 //!
 //! # Adding Tools
 //!
 //! To add a new tool:
 //!
-//! 1. Create a module in `src/` (e.g., `src/file.rs`)
+//! 1. Create a module in `src/` (e.g., `src/mytool.rs`)
 //! 2. Implement the [`Tool`](agent_core::Tool) trait
 //! 3. Add comprehensive documentation explaining what/why/when
 //! 4. Export from this file
@@ -31,7 +45,15 @@
 //! Return [`ToolOutput::error()`](agent_core::ToolOutput::error) for failures.
 
 mod bash;
+mod cat;
 mod file;
+mod find;
+mod head;
+mod ripgrep;
 
 pub use bash::BashTool;
+pub use cat::CatTool;
 pub use file::FileTool;
+pub use find::FindTool;
+pub use head::HeadTool;
+pub use ripgrep::RipgrepTool;

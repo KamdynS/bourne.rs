@@ -16,3 +16,5 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 dotenvy = "0.15"
+glob = "0.3"
+regex = "1"
