@@ -1,9 +1,11 @@
+mod agent;
 mod client;
 mod error;
 mod providers;
 mod tool;
 mod types;
 
+pub use agent::{Agent, AgentBuilder, AgentEvent};
 pub use client::LlmClient;
 pub use error::{AgentError, LlmError};
 pub use providers::AnthropicClient;
