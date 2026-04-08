@@ -70,6 +70,7 @@ cargo run --example mock_demo -p agent-core
 |---------|------|---------------|
 | `mock_demo` | Mock | Agent construction, event streaming |
 | `live_simple` | Live | Basic Anthropic API integration, tool calls |
+| `live_unix_tools` | Live | Unix tools (find, rg, cat, head) composition |
 
 ## Adding New Features
 
