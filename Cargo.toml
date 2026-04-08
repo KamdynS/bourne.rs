@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["agent-core"]
+members = ["agent-core", "agent-tools"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }

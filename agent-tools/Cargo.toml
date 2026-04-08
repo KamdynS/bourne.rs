@@ -1,0 +1,12 @@
+[package]
+name = "agent-tools"
+version = "0.1.0"
+edition = "2024"
+description = "Built-in tools for agent-rs"
+license = "MIT"
+
+[dependencies]
+agent-core = { path = "../agent-core" }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
