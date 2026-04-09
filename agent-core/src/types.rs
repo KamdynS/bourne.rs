@@ -29,6 +29,8 @@
 //! └── usage: TokenUsage           # Token counts
 //! ```
 
+use serde::{Deserialize, Serialize};
+
 // =============================================================================
 // TOKEN USAGE
 // =============================================================================
@@ -98,7 +100,7 @@ pub struct Request {
 /// User messages typically contain either:
 /// - Just text (the user's input)
 /// - ToolResult blocks (responses to the assistant's tool calls)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
@@ -111,7 +113,7 @@ pub struct Message {
 ///
 /// Note: Some providers have a "System" role, but we handle system prompts
 /// separately (in Request.system) for better cross-provider compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
@@ -132,7 +134,7 @@ pub enum Role {
 /// 2. We execute the tool
 /// 3. We send: `[ToolResult { id: same_id, content: output, is_error: false }]`
 /// 4. Model continues with the result
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContentBlock {
     /// Plain text content.
     Text(String),

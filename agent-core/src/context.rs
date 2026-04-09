@@ -421,6 +421,153 @@ impl ContextStore for InMemoryStore {
 }
 
 // =============================================================================
+// SQLITE STORE (Feature: persistence)
+// =============================================================================
+
+/// SQLite-backed storage for messages.
+///
+/// Messages are stored in a SQLite database, persisting across process
+/// restarts. Each session is a row with JSON-serialized messages.
+///
+/// # Schema
+///
+/// ```sql
+/// CREATE TABLE IF NOT EXISTS sessions (
+///     session_id TEXT PRIMARY KEY,
+///     messages TEXT NOT NULL,  -- JSON array
+///     updated_at INTEGER NOT NULL
+/// );
+/// ```
+///
+/// # Thread Safety
+///
+/// Uses a Mutex-wrapped connection. SQLite itself handles concurrency
+/// at the file level.
+///
+/// # When to Use
+///
+/// - Long-running agents that need to resume after restart
+/// - Multi-session applications (chat servers, etc.)
+/// - When you need an audit trail of conversations
+///
+/// # Feature Flag
+///
+/// Requires `persistence` feature:
+/// ```toml
+/// agent-core = { version = "0.1", features = ["persistence"] }
+/// ```
+#[cfg(feature = "persistence")]
+pub struct SqliteStore {
+    conn: std::sync::Mutex<rusqlite::Connection>,
+}
+
+#[cfg(feature = "persistence")]
+impl SqliteStore {
+    /// Open or create a SQLite database for message storage.
+    ///
+    /// Creates the sessions table if it doesn't exist.
+    ///
+    /// # Arguments
+    ///
+    /// - `path`: Path to the SQLite database file
+    ///
+    /// # Errors
+    ///
+    /// Returns error if database cannot be opened or schema cannot be created.
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, rusqlite::Error> {
+        let conn = rusqlite::Connection::open(path)?;
+
+        // Create schema
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                messages TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+
+    /// Create an in-memory SQLite database.
+    ///
+    /// Useful for testing - data is lost when dropped.
+    pub fn in_memory() -> Result<Self, rusqlite::Error> {
+        let conn = rusqlite::Connection::open_in_memory()?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                messages TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        Ok(Self {
+            conn: std::sync::Mutex::new(conn),
+        })
+    }
+}
+
+#[cfg(feature = "persistence")]
+impl ContextStore for SqliteStore {
+    fn load(&self, session_id: &str) -> Vec<Message> {
+        let conn = self.conn.lock().unwrap();
+
+        let result: Result<String, _> = conn.query_row(
+            "SELECT messages FROM sessions WHERE session_id = ?",
+            [session_id],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn save(&self, session_id: &str, messages: &[Message]) {
+        let conn = self.conn.lock().unwrap();
+        let json = serde_json::to_string(messages).unwrap_or_else(|_| "[]".to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Upsert: insert or replace
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO sessions (session_id, messages, updated_at) VALUES (?, ?, ?)",
+            rusqlite::params![session_id, json, now],
+        );
+    }
+
+    fn clear(&self, session_id: &str) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute("DELETE FROM sessions WHERE session_id = ?", [session_id]);
+    }
+
+    fn list_sessions(&self) -> Vec<String> {
+        let conn = self.conn.lock().unwrap();
+
+        let mut stmt = match conn.prepare("SELECT session_id FROM sessions ORDER BY updated_at DESC") {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        let rows = stmt.query_map([], |row| row.get(0));
+
+        match rows {
+            Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
+// =============================================================================
 // CONTEXT MANAGER
 // =============================================================================
 
@@ -745,5 +892,103 @@ mod tests {
         assert!(result.is_ok());
         // Messages unchanged
         assert_eq!(messages.len(), 2);
+    }
+
+    // =========================================================================
+    // SQLITE TESTS (Feature: persistence)
+    // =========================================================================
+
+    #[cfg(feature = "persistence")]
+    mod sqlite_tests {
+        use super::*;
+
+        #[test]
+        fn test_sqlite_store_basic() {
+            let store = SqliteStore::in_memory().unwrap();
+
+            // Initially empty
+            assert!(store.load("session1").is_empty());
+
+            // Save and load
+            let messages = vec![make_message(Role::User, "Hello from SQLite")];
+            store.save("session1", &messages);
+
+            let loaded = store.load("session1");
+            assert_eq!(loaded.len(), 1);
+            assert!(matches!(&loaded[0].content[0], ContentBlock::Text(s) if s == "Hello from SQLite"));
+        }
+
+        #[test]
+        fn test_sqlite_store_multiple_sessions() {
+            let store = SqliteStore::in_memory().unwrap();
+
+            store.save("a", &vec![make_message(Role::User, "Session A")]);
+            store.save("b", &vec![make_message(Role::User, "Session B")]);
+
+            assert_eq!(store.load("a").len(), 1);
+            assert_eq!(store.load("b").len(), 1);
+
+            // Sessions are independent
+            let sessions = store.list_sessions();
+            assert!(sessions.contains(&"a".to_string()));
+            assert!(sessions.contains(&"b".to_string()));
+        }
+
+        #[test]
+        fn test_sqlite_store_overwrite() {
+            let store = SqliteStore::in_memory().unwrap();
+
+            store.save("s", &vec![make_message(Role::User, "First")]);
+            store.save("s", &vec![make_message(Role::User, "Second")]);
+
+            let loaded = store.load("s");
+            assert_eq!(loaded.len(), 1);
+            assert!(matches!(&loaded[0].content[0], ContentBlock::Text(s) if s == "Second"));
+        }
+
+        #[test]
+        fn test_sqlite_store_clear() {
+            let store = SqliteStore::in_memory().unwrap();
+
+            store.save("s", &vec![make_message(Role::User, "Test")]);
+            assert_eq!(store.load("s").len(), 1);
+
+            store.clear("s");
+            assert!(store.load("s").is_empty());
+        }
+
+        #[test]
+        fn test_sqlite_store_with_context_manager() {
+            let store = SqliteStore::in_memory().unwrap();
+            let manager = ContextManager::new(store, DropOldest, 1000);
+
+            manager.add_message("s1", make_message(Role::User, "Hello"));
+            manager.add_message("s1", make_message(Role::Assistant, "Hi there!"));
+
+            let messages = manager.get_messages("s1");
+            assert_eq!(messages.len(), 2);
+        }
+
+        #[test]
+        fn test_sqlite_store_file_persistence() {
+            use tempfile::NamedTempFile;
+
+            let temp_file = NamedTempFile::new().unwrap();
+            let path = temp_file.path().to_path_buf();
+
+            // Write to file
+            {
+                let store = SqliteStore::open(&path).unwrap();
+                store.save("s1", &vec![make_message(Role::User, "Persisted message")]);
+            }
+
+            // Read from file (new connection)
+            {
+                let store = SqliteStore::open(&path).unwrap();
+                let loaded = store.load("s1");
+                assert_eq!(loaded.len(), 1);
+                assert!(matches!(&loaded[0].content[0], ContentBlock::Text(s) if s == "Persisted message"));
+            }
+        }
     }
 }

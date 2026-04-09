@@ -3,6 +3,11 @@ name = "agent-core"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Enable SQLite-backed context storage
+persistence = ["rusqlite"]
+
 [dependencies]
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -14,7 +19,11 @@ futures.workspace = true
 reqwest.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 
+# Optional: SQLite for persistent context storage
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
 [dev-dependencies]
 dotenvy = "0.15"
 glob = "0.3"
 regex = "1"
+tempfile = "3"

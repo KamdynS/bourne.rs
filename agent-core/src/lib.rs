@@ -13,6 +13,9 @@ pub use context::{
     summarize_messages, ContextManager, ContextStore, DropOldest, EvictionStrategy, InMemoryStore,
     SlidingWindow,
 };
+
+#[cfg(feature = "persistence")]
+pub use context::SqliteStore;
 pub use error::{AgentError, LlmError};
 pub use providers::{AnthropicClient, OpenAiClient};
 pub use tool::{Tool, ToolOutput};
