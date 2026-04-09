@@ -9,7 +9,10 @@ mod types;
 
 pub use agent::{Agent, AgentBuilder, AgentEvent};
 pub use client::LlmClient;
-pub use context::{ContextManager, ContextStore, DropOldest, EvictionStrategy, InMemoryStore};
+pub use context::{
+    summarize_messages, ContextManager, ContextStore, DropOldest, EvictionStrategy, InMemoryStore,
+    SlidingWindow,
+};
 pub use error::{AgentError, LlmError};
 pub use providers::{AnthropicClient, OpenAiClient};
 pub use tool::{Tool, ToolOutput};

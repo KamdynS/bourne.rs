@@ -51,7 +51,7 @@
 //! let messages = manager.get_messages();
 //! ```
 
-use crate::{ContentBlock, Message, Role};
+use crate::{ContentBlock, LlmClient, Message, Request, Role};
 
 // =============================================================================
 // TOKEN ESTIMATION
@@ -149,6 +149,185 @@ impl EvictionStrategy for DropOldest {
             messages.remove(1);
         }
     }
+}
+
+// =============================================================================
+// SLIDING WINDOW STRATEGY
+// =============================================================================
+
+/// Keep only the N most recent messages.
+///
+/// A fixed-size window that always keeps the last N messages,
+/// regardless of token count. Simple and predictable.
+///
+/// # Behavior
+///
+/// - Always keeps the first message (initial context)
+/// - Keeps the last `window_size - 1` messages
+/// - Evicts everything in between when window is exceeded
+///
+/// # Trade-offs
+///
+/// **Pros:**
+/// - Predictable memory usage
+/// - Simple to reason about
+/// - Preserves recent context
+///
+/// **Cons:**
+/// - May cut off mid-conversation
+/// - Doesn't consider token counts
+/// - First message might become stale
+#[derive(Debug, Clone)]
+pub struct SlidingWindow {
+    /// Maximum number of messages to keep.
+    window_size: usize,
+}
+
+impl SlidingWindow {
+    /// Create a sliding window strategy.
+    ///
+    /// # Arguments
+    ///
+    /// - `window_size`: Max messages to keep (minimum 2: first + last)
+    pub fn new(window_size: usize) -> Self {
+        Self {
+            window_size: window_size.max(2),
+        }
+    }
+}
+
+impl EvictionStrategy for SlidingWindow {
+    fn evict(&self, messages: &mut Vec<Message>, _target_tokens: usize) {
+        if messages.len() <= self.window_size {
+            return;
+        }
+
+        // Remove messages from index 1 until we're at window_size
+        let remove_count = messages.len() - self.window_size;
+        for _ in 0..remove_count {
+            messages.remove(1);
+        }
+    }
+}
+
+// =============================================================================
+// ASYNC SUMMARIZATION
+// =============================================================================
+
+/// Summarize a batch of messages using an LLM.
+///
+/// This is an explicit operation, not an automatic eviction strategy,
+/// because it requires async LLM calls. Call this when you want to
+/// compact a conversation while preserving context.
+///
+/// # How It Works
+///
+/// 1. Takes messages from index 1 to `end_index`
+/// 2. Sends them to the LLM with a summarization prompt
+/// 3. Replaces them with a single "summary" message
+///
+/// # Example
+///
+/// ```ignore
+/// // Before: [user, assistant, user, assistant, user, assistant]
+/// // After:  [user, summary_of_middle, assistant]
+/// summarize_messages(&client, &mut messages, 4).await?;
+/// ```
+pub async fn summarize_messages(
+    client: &dyn LlmClient,
+    messages: &mut Vec<Message>,
+    end_index: usize,
+) -> Result<(), crate::LlmError> {
+    if messages.len() < 3 || end_index < 2 {
+        // Nothing to summarize
+        return Ok(());
+    }
+
+    let end = end_index.min(messages.len() - 1);
+
+    // Extract messages to summarize (indices 1..end)
+    let to_summarize: Vec<_> = messages[1..end].to_vec();
+
+    if to_summarize.is_empty() {
+        return Ok(());
+    }
+
+    // Build summarization prompt
+    let conversation_text = format_messages_for_summary(&to_summarize);
+
+    let summary_request = Request {
+        system: Some(
+            "You are a helpful assistant. Summarize the following conversation \
+             concisely, preserving key information, decisions, and context. \
+             Be brief but complete."
+                .to_string(),
+        ),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text(format!(
+                "Please summarize this conversation:\n\n{}",
+                conversation_text
+            ))],
+        }],
+        tools: vec![],
+        max_tokens: 500,
+    };
+
+    // Get summary from LLM
+    let response = client.complete(summary_request).await?;
+
+    let summary_text = response
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Create summary message
+    let summary_message = Message {
+        role: Role::User,
+        content: vec![ContentBlock::Text(format!(
+            "[Previous conversation summary: {}]",
+            summary_text
+        ))],
+    };
+
+    // Replace summarized messages with summary
+    // Remove messages 1..end, insert summary at index 1
+    for _ in 1..end {
+        messages.remove(1);
+    }
+    messages.insert(1, summary_message);
+
+    Ok(())
+}
+
+/// Format messages for the summarization prompt.
+fn format_messages_for_summary(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .map(|msg| {
+            let role = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+            let content: String = msg
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text(s) => Some(s.as_str()),
+                    ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
+                    ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{}: {}", role, content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // =============================================================================
@@ -441,5 +620,130 @@ mod tests {
 
         assert!(manager.remaining_tokens("s1") < 100);
         assert!(manager.remaining_tokens("s1") > 90);
+    }
+
+    #[test]
+    fn test_sliding_window_strategy() {
+        let mut messages = vec![
+            make_message(Role::User, "First message - this is the initial context"),
+            make_message(Role::Assistant, "Second message - assistant response one"),
+            make_message(Role::User, "Third message - user follow up question"),
+            make_message(Role::Assistant, "Fourth message - assistant response two"),
+            make_message(Role::User, "Fifth message - another user question"),
+        ];
+
+        // Window of 3: keep first + last 2
+        let window = SlidingWindow::new(3);
+        window.evict(&mut messages, 0); // target_tokens ignored by SlidingWindow
+
+        assert_eq!(messages.len(), 3);
+        // First message preserved
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text(s) if s.contains("First")));
+        // Last two messages preserved
+        assert!(matches!(&messages[1].content[0], ContentBlock::Text(s) if s.contains("Fourth")));
+        assert!(matches!(&messages[2].content[0], ContentBlock::Text(s) if s.contains("Fifth")));
+    }
+
+    #[test]
+    fn test_sliding_window_under_limit() {
+        let mut messages = vec![
+            make_message(Role::User, "First message"),
+            make_message(Role::Assistant, "Second message"),
+        ];
+
+        // Window of 5, but only 2 messages - nothing should be evicted
+        let window = SlidingWindow::new(5);
+        window.evict(&mut messages, 0);
+
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_sliding_window_minimum_size() {
+        // Window size < 2 should clamp to 2
+        let window = SlidingWindow::new(1);
+
+        let mut messages = vec![
+            make_message(Role::User, "First"),
+            make_message(Role::Assistant, "Second"),
+            make_message(Role::User, "Third"),
+        ];
+
+        window.evict(&mut messages, 0);
+
+        // Should keep first + last = 2 messages
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn test_context_manager_with_sliding_window() {
+        // Window of 3 messages
+        // Use small token budget (~12 tokens) to trigger eviction after 3-4 messages
+        // Each message is ~11 chars = ~3 tokens
+        let manager = ContextManager::new(InMemoryStore::new(), SlidingWindow::new(3), 12);
+
+        manager.add_message("s1", make_message(Role::User, "Message one"));
+        manager.add_message("s1", make_message(Role::Assistant, "Message two"));
+        manager.add_message("s1", make_message(Role::User, "Message three"));
+        manager.add_message("s1", make_message(Role::Assistant, "Message four"));
+        manager.add_message("s1", make_message(Role::User, "Message five"));
+
+        let messages = manager.get_messages("s1");
+
+        // Should have evicted to window size (once token budget exceeded)
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_summarize_messages() {
+        use crate::mock::{MockClient, MockResponse};
+
+        // Mock client that returns a summary
+        let client = MockClient::new(vec![MockResponse::text(
+            "The user asked about Rust and the assistant explained ownership.",
+        )]);
+
+        let mut messages = vec![
+            make_message(Role::User, "Tell me about Rust programming"),
+            make_message(Role::Assistant, "Rust is a systems programming language focused on safety."),
+            make_message(Role::User, "What about ownership?"),
+            make_message(Role::Assistant, "Ownership is Rust's key feature for memory safety."),
+            make_message(Role::User, "Thanks! Now let's talk about something else."),
+        ];
+
+        // Summarize messages 1..4 (middle 3 messages)
+        summarize_messages(&client, &mut messages, 4).await.unwrap();
+
+        // Should have: [first message, summary, last message]
+        assert_eq!(messages.len(), 3);
+
+        // First message unchanged
+        assert!(matches!(&messages[0].content[0], ContentBlock::Text(s) if s.contains("Rust programming")));
+
+        // Second message is summary
+        assert!(matches!(&messages[1].content[0], ContentBlock::Text(s) if s.contains("summary")));
+
+        // Last message unchanged
+        assert!(matches!(&messages[2].content[0], ContentBlock::Text(s) if s.contains("something else")));
+    }
+
+    #[tokio::test]
+    async fn test_summarize_messages_too_short() {
+        use crate::mock::MockClient;
+
+        // Client should not be called - empty responses would error if called
+        let client = MockClient::new(vec![]);
+
+        let mut messages = vec![
+            make_message(Role::User, "Hello"),
+            make_message(Role::Assistant, "Hi"),
+        ];
+
+        // Try to summarize, but too few messages
+        let result = summarize_messages(&client, &mut messages, 2).await;
+
+        assert!(result.is_ok());
+        // Messages unchanged
+        assert_eq!(messages.len(), 2);
     }
 }
